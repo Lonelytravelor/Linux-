@@ -231,6 +231,8 @@ Google在android11-5.4分支上开始要求所有下游厂商使用Generic Kerne
 
 ## 3.3 vendor hook实现
 
+![image-20240120231009824](/Users/wang/Downloads/image-20240120231009824.png)
+
 ### 3.3.1 创建头文件xxx.h
 
 在include/trace/hooks/目录下创建一个新的头文件xxx.h，定义一组hook接口register_trace_android_vh_xxx、trace_android_vh_xxx和全局变量__tracepoint_android_vh_xxx
@@ -247,7 +249,7 @@ DECLARE_HOOK(android_vh_binder_set_priority,
         TP_ARGS(t, task));
 ```
 
-### 3.3.2 引用头文件xxx.h
+### 3.3.2 export头文件xxx.h
 
 在drivers/android/vendor_hooks.c文件中包含hook头文件xxx.h，export hook变量__tracepoint_android_vh_xxx给模块使用。
 
@@ -258,7 +260,7 @@ DECLARE_HOOK(android_vh_binder_set_priority,
 ```C++
 #define CREATE_TRACE_POINTS
 #include <trace/hooks/vendor_hooks.h>
-#include <linux/tracepoint.h>
+#include <trace/hooks/binder.h>
 ......
 EXPORT_TRACEPOINT_SYMBOL_GPL(android_vh_binder_set_priority);
 EXPORT_TRACEPOINT_SYMBOL_GPL(android_vh_binder_restore_priority);
@@ -272,8 +274,6 @@ EXPORT_TRACEPOINT_SYMBOL_GPL(android_vh_binder_restore_priority);
 
 > 代码引用：NULL
 
-![img](https://p2onpu7kg4.feishu.cn/space/api/box/stream/download/asynccode/?code=MmI4NTMwNDU2YTUxOTkyMmM4Y2U2M2VkMjIxZjExNTVfdElpVFBDbDRPM3B6QWZ5SmdmSnNpWkEwOTJ5RWg0U0JfVG9rZW46S1lMVmJzMnFDb0xndVl4Mjl0ZmNIYkJWbjFnXzE3MDU2ODA2NjE6MTcwNTY4NDI2MV9WNA)
-
 ```C++
 #include<trace/hocks/binder.h>
 
@@ -282,7 +282,7 @@ static void xxx(){
     print("hello hock!");
 }
 
-rc = trace_android_vh_binder_set_priority(xxx,NULL);
+rc = register_trace_android_vh_binder_set_priority(xxx,NULL);
 ```
 
 ### 3.3.4 调用hook接口
@@ -294,6 +294,9 @@ rc = trace_android_vh_binder_set_priority(xxx,NULL);
 > 代码引用：https://github.com/MiCode/Xiaomi_Kernel_OpenSource/blob/bsp-vermeer-t-oss/drivers/android/binder.c
 
 ```C++
+#include <linux/android_vendor.h>
+#include <trace/hooks/binder.h>
+......
 static void binder_transaction_priority(struct binder_thread *thread,
                                         struct binder_transaction *t,
                                         struct binder_node *node)
@@ -308,11 +311,64 @@ static void binder_transaction_priority(struct binder_thread *thread,
 
 ## 3.4 一些技术细节
 
-### 3.4.1 DECLARE_HOOK与DEFINE_TRACE
+### 3.4.1 DECLARE_TRACE与DEFINE_TRACE[ChatGPT]
 
-### 3.4.2 DEFINE_TRACE参数问题
+在Linux内核中，`DEFINE_TRACE`和`DECLARE_TRACE`是用于定义和声明事件跟踪点的宏。
 
-## 3.4 偶现问题与原因
+1. **DECLARE_TRACE:**
+   1. `DECLARE_TRACE`用于在头文件中声明一个跟踪点，但不分配其具体的实现。这通常在头文件中用于声明一个跟踪点，以便在多个文件中引用相同的跟踪点。
+   2. 示例：
+   3. ```C
+      DECLARE_TRACE(my_event_name);
+      ```
+2. **DEFINE_TRACE:**
+   1. `DEFINE_TRACE`用于在源文件中为跟踪点定义实现。它负责为事件跟踪点生成实际的代码，包括事件注册、注销和调用相关的处理函数。
+   2. 示例：
+   3. ```C
+      DEFINE_TRACE(my_event_name);
+      ```
+
+通常，这两者一起使用。首先，在头文件中使用`DECLARE_TRACE`声明跟踪点，然后在一个或多个源文件中使用`DEFINE_TRACE`定义实际的跟踪点实现。
+
+例如，如果你在一个头文件中声明了一个跟踪点：
+
+```C
+// my_trace.h
+DECLARE_TRACE(my_event_name);
+```
+
+然后在源文件中定义该跟踪点：
+
+```C
+// my_trace.c   
+#include "my_trace.h"
+DEFINE_TRACE(my_event_name);
+```
+
+这样，你就可以在整个代码库中使用`my_event_name`这个事件跟踪点，而实现部分则在`my_trace.c`中定义。
+
+### 3.4.2 为什么在vendor hook实现没有用到DEFINE_TRACE[ChatGPT]
+
+在你提供的代码中，通过 `DECLARE_TRACE(tp_test, TP_PROTO(int num), TP_ARGS(num));` 语句已经声明了 `tp_test` 这个跟踪点，而在代码中并没有直接使用 `DEFINE_TRACE(tp_test);`。在这个特定的情境下，由于 `DEFINE_TRACE` 的定义通常隐含在 `DECLARE_TRACE` 的内部，你的代码是没有问题的。
+
+在内核中，`DECLARE_TRACE` 通常会包含足够的信息以便生成跟踪点的实现。这可能包括注册、注销和触发函数的相关信息。实际上，你的代码中的 `DEFINE_TRACE(tp_test);` 部分可能已经由内核的其他部分自动生成，而不需要显式写出来。
+
+总的来说，你的代码是合法的，因为 `DECLARE_TRACE` 在这里提供了足够的信息，以便内核在需要时自动生成相应的 `DEFINE_TRACE` 部分。
+
+### 3.4.3 DECLARE_HOOK和DECLARE_TRACE的关系
+
+因为在include/trace/hooks/vendor_hooks.h中将DECLARE_HOOK宏定义为DECLARE_TRACE.
+
+> 代码链接:https://github.com/MiCode/Xiaomi_Kernel_OpenSource/blob/bsp-vermeer-t-oss/include/trace/hooks/vendor_hooks.h
+
+```C++
+// include/trace/hooks/vendor_hooks.h
+...
+#define DECLARE_HOOK DECLARE_TRACE
+...
+```
+
+## 3.5 偶现问题与原因
 
 **问题现象（xiaomi测试时未发现）**：测试偶现dump “BUG: scheduling while atomic:”
 
