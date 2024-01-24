@@ -231,7 +231,9 @@ Google在android11-5.4分支上开始要求所有下游厂商使用Generic Kerne
 
 ## 3.3 vendor hook实现
 
-![image-20240120231009824](/Users/wang/Downloads/image-20240120231009824.png)
+**总的vendor hook实现逻辑为：**宏声明函数-->export导出函数-->内核注册函数-->调用函数
+
+![image-20240124082029317](../../图床/image-20240124082029317.png)
 
 ### 3.3.1 创建头文件xxx.h
 
@@ -368,17 +370,81 @@ DEFINE_TRACE(my_event_name);
 ...
 ```
 
-## 3.5 偶现问题与原因
-
-**问题现象（xiaomi测试时未发现）**：测试偶现dump “BUG: scheduling while atomic:”
-
-**原因分析：**
+### 3.4.4 DECLARE_HOOK和DECLARE_RESTRICTED_HOOK的关系
 
 vendor hook变量有两种，都是基于tracepoints的：
 
 正常的：使用DECLARE_HOOK宏创建tracepoint函数trace_<name>，要求name在trace中是独一无二的，callback函数的调用是在关抢占的场景中使用的
 
-受限制的：受限制的hook在scheduler hook类的场景中使用，绑定的callback函数可以在cpu offline或非原子上下文中调用（调用前没有关抢占），受限制的vendor hook不能被解绑定，所以绑定的模块不能卸载，只允许有一个绑定（任何其他绑定将会返回-EBUSY错误）。
+受限制的：受限制的DECLARE_RESTRICTED_HOOK在scheduler hook类的场景中使用，绑定的callback函数可以在cpu offline或非原子上下文中调用（调用前没有关抢占），**受限制的vendor hook不能被解绑定**，所以绑定的模块不能卸载，只允许有一个绑定（任何其他绑定将会返回-EBUSY错误）。
+
+## 3.5 实践出真知
+
+### 3.5.1 前言
+
+当前HOCK都是谷歌已经export出来指定位置的HOCK，不用我们手动声明即可直接调用，如需新增客制化HOCK则需要向谷歌申请。
+
+### 3.5.2 实践
+
+**内核部分实现**
+
+注意sayHello方法的参数列表一定要按照以下格式去定义：
+
+- 第一个函数需要是void*，例如void *data
+- 后面参数列表需要根据DECLARE_HOCK中声明的去定义
+
+以及请注意：不是所有的HOCK都可以被unregister。
+
+```C
+// drivers/staging/binder_prio/testTrace.c
+#include <linux/init.h>
+#include <linux/seq_file.h>
+#include <linux/kernel.h>
+#include <linux/module.h>
+#include <trace/hooks/sched.h>
+#include <../../../kernel/sched/sched.h>
+
+
+static void sayHello(void *data, struct rq *rq) {
+        pr_info("sayHello！");
+}
+
+int __init test_init(void)
+{
+    pr_info("TracePoint: module init!");
+    register_trace_android_vh_scheduler_tick(sayHello, NULL);
+    return 0;
+}
+void __exit test_exit(void)
+{
+    unregister_trace_android_vh_scheduler_tick(sayHello, NULL);
+    pr_info("TracePoint: module exit!");
+}
+
+module_init(test_init);
+module_exit(test_exit);
+
+MODULE_LICENSE("GPL");
+MODULE_AUTHOR("Me");
+MODULE_DESCRIPTION("Test");
+```
+
+**Makefile部分实现**
+
+```C
+// drivers/staging/binder_prio/Makefile
+obj-m += testTrace.o
+```
+
+## 3.6 偶现问题与原因
+
+**问题现象：** **xiaomi测试时未发现**：测试偶现dump “BUG: scheduling while atomic:”
+
+**编译不过：**error: implicit declaration of function 'unregister_trace_android_rvh_select_task_rq_fair' [-Werror,-Wimplicit-function-declaration]
+
+**原因分析：**
+
+如3.4.4 DECLARE_HOOK和DECLARE_RESTRICTED_HOOK的关系所言。
 
 **解决方法：**根据使用场景选择适合的vendor hook变量，在可能会调度的场景需要使用受限制的vendor hook
 
