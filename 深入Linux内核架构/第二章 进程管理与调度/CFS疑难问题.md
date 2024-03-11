@@ -1,14 +1,4 @@
-# CFS疑难问题
-
-# CFS如何保证在一个调度延迟周期中保证所有进程都被调度到?
-
-**回答:在每个周期调度器的每个滴答周期中,检查当前进程的执行时间是否超过预期时间;**
-
-> 注:这个检查是否超过预期是在每次周期调度器中去计算和验证的,而非在调度周期开始的时候进行计算的;
-
-1. ## 背景
-
-在CFS调度器中,CFS会保证每一个调度周期中每一个进程都会被调度;
+# CFS的延迟周期是怎么计算的？
 
 1. ## 概念
 
@@ -23,6 +13,49 @@
 [ sched_nr_latency=\frac{sysctl_sched_latency}{sysctl_sched_min_granularity} ]
 
 这个比值是一个调度延迟内允许的最大运行数目;
+
+1. ## 计算过程
+
+- 如果可运行进程个数小于 sched_nr_latency，调度周期等于调度延迟。
+- 如果可运行进程超过了sched_nr_latency， 系统就不去理会调度延迟，转而保证调度最小粒度，这种情况下，调度周期等于最小粒度乘可运行进程个数。这在kernel/sched/fair.c中计算调度周期的函数可以看出来。
+
+```C
+/*
+ * The idea is to set a period in which each task runs once.
+ *
+ * When there are too many tasks (sched_nr_latency) we have to stretch
+ * this period because otherwise the slices get too small.
+ *
+ * p = (nr <= nl) ? l : l*nr/nl
+ */
+static u64 __sched_period(unsigned long nr_running)
+{
+    if (unlikely(nr_running > sched_nr_latency))
+        return nr_running * sysctl_sched_min_granularity;
+    else
+        return sysctl_sched_latency;
+}
+```
+
+# sysctl_sched_min_granularity是一个延迟调度周期中的最短执行单位吗？
+
+1. ## 概念
+
+如果可运行进程超过了sched_nr_latency， 系统就不去理会调度延迟，转而保证调度最小粒度，这种情况下，调度周期等于最小粒度乘可运行进程个数。
+
+1. ## 问题
+
+按照上文所说，延迟周期的时间为最小粒度乘可运行进程个数，同时在一个调度周期内所有进程都需要被执行到，那么优先级是不是就失去了作用，即每一个调度周期中，每一个进程都执行sysctl_sched_min_granularity时间；
+
+# CFS如何保证在一个调度延迟周期中保证所有进程都被调度到?
+
+**回答:在每个周期调度器的每个滴答周期中,检查当前进程的执行时间是否超过预期时间;**
+
+> 注:这个检查是否超过预期是在每次周期调度器中去计算和验证的,而非在调度周期开始的时候进行计算的;
+
+1. ## 背景
+
+在CFS调度器中,CFS会保证每一个调度周期中每一个进程都会被调度;
 
 1. ## 数据结构
 
@@ -252,3 +285,63 @@ check_preempt_tick(struct cfs_rq *cfs_rq, struct sched_entity *curr)
         resched_curr(rq_of(cfs_rq));
 }
 ```
+
+# 何时会调用update_curr函数来更新当前进程的状态？
+
+从fair.c文件中可以看到,主要有以下几个场景会涉及到update_curr:
+
+- 进程创建  `task_fork_fair`
+- 进程唤醒 `check_preempt_wakeup`
+- 进程主动让出 `yield_task_fair`
+- 队列操作 `dequeue_entity`
+- 滴答周期 `entity_tick`
+- 重新计算负载 `reweight_entity`
+- 选择下一个进程 `pick_next_task_fair`
+
+# update_curr都做了什么?
+
+```C
+static void update_curr(struct cfs_rq *cfs_rq)
+{
+    struct sched_entity *curr = cfs_rq->curr;
+    u64 now = rq_clock_task(rq_of(cfs_rq));
+    u64 delta_exec;
+
+    if (unlikely(!curr))
+        return;
+
+    delta_exec = now - curr->exec_start;
+    if (unlikely((s64)delta_exec <= 0))
+        return;
+
+    curr->exec_start = now;
+
+    if (schedstat_enabled()) {
+        struct sched_statistics *stats;
+
+        stats = __schedstats_from_se(curr);
+        __schedstat_set(stats->exec_max,
+                max(delta_exec, stats->exec_max));
+    }
+
+    curr->sum_exec_runtime += delta_exec;
+    schedstat_add(cfs_rq->exec_clock, delta_exec);
+
+    curr->vruntime += calc_delta_fair(delta_exec, curr);
+    update_min_vruntime(cfs_rq);
+
+    if (entity_is_task(curr)) {
+        struct task_struct *curtask = task_of(curr);
+
+        trace_sched_stat_runtime(curtask, delta_exec, curr->vruntime);
+        cgroup_account_cputime(curtask, delta_exec);
+        account_group_exec_runtime(curtask, delta_exec);
+    }
+
+    account_cfs_rq_runtime(cfs_rq, delta_exec);
+}
+```
+
+# CFS中load的概念是什么？
+
+# CFS如何衡量当前负载是否比较重？
