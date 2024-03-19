@@ -1,4 +1,4 @@
-# Linux内核调试技术——kretprobe使用与实现详解
+# Linux内核调试技术——kretprobe使用与实现
 
 > 参考文档：https://blog.csdn.net/luckyapple1028/article/details/54782659
 
@@ -216,7 +216,7 @@ kretprobe的实现基于kprobe，因此这里将在前一篇博文《Linux内核
 
 kretprobe探测模块调用register_kretprobe函数向内核注册一个kretprobe实例，代码路径为kernel/kprobes.c，其主要流程如下图：
 
-![img](https://p2onpu7kg4.feishu.cn/space/api/box/stream/download/asynccode/?code=YmIwNWY0NDEwZjVmYTA5OTYwNDBlMzdlMDJlOTM1NGNfWkhUaXNYcUhtV2REa2ROeUFIVXI4MDFSVmxFZEVVMUZfVG9rZW46VUppeGJlVnRpb3dIaHJ4VWl0WmNEcXJKbnFoXzE3MTA3NDU1MzA6MTcxMDc0OTEzMF9WNA)
+![img](https://p2onpu7kg4.feishu.cn/space/api/box/stream/download/asynccode/?code=ZGMwODhjZDYxMjRmM2JmNDkyODY2Yzc3YzAwYTExMjRfYkwyNkxpQW5aUkN3T1RaYTdRNkxYcjVXb2lNYUlGRUJfVG9rZW46VUppeGJlVnRpb3dIaHJ4VWl0WmNEcXJKbnFoXzE3MTA4NjA3MjI6MTcxMDg2NDMyMl9WNA)
 
 ### 2.2.2 函数的主要代码一
 
@@ -330,7 +330,7 @@ struct kretprobe_blackpoint kretprobe_blacklist[] = {
 
 基于kprobe机制，在执行到指定的被探测函数后，会触发CPU异常，进入kprobe探测流程。
 
-![img](https://p2onpu7kg4.feishu.cn/space/api/box/stream/download/asynccode/?code=MWMxYmJiNjU3Yzk1MmJhZDFkMDU3ZmVhYmVlZDRjYWJfYlVXOWc0UkY1TGRJOW91cjZ4dDdjVkx4dk1MQm9wQnZfVG9rZW46RDk4OWJ5SW15b25GUFF4eHpSMWN3VkNVbjNDXzE3MTA3NDU1MzA6MTcxMDc0OTEzMF9WNA)
+![img](https://p2onpu7kg4.feishu.cn/space/api/box/stream/download/asynccode/?code=Njg0NDBhYTNjYWRmZGIzZWU4MDAxZGQ0YmFlYzk3ZmNfNmdNcXBkejJQa2hEcVhlSDZLNzBQQVJlb3Zpa0dOWVJfVG9rZW46RDk4OWJ5SW15b25GUFF4eHpSMWN3VkNVbjNDXzE3MTA4NjA3MjI6MTcxMDg2NDMyMl9WNA)
 
 首先由kprobe_handler函数调用pre_handler回调函数，此处为pre_handler_kretprobe函数。
 
@@ -649,6 +649,91 @@ static void __used kretprobe_trampoline_holder(void)
 ```
 
 实现的原理同arm是一致的，这里会调用SAVE_REGS_STRING把寄存器压栈，构造出pt_regs变量，然后调用trampoline_handler函数，这个函数基本同arm的一模一样，就不贴了，最后kretprobe_trampoline_holder恢复栈空间和原始返回地址，跳转到正常的执行流程中继续执行。
+
+# 3.问题汇总
+
+## 3.1 参数问题
+
+### 3.1.1 entry_handler函数的参数含义
+
+struct kretprobe_instance *ri和struct pt_regs *regs两个参数其中:
+
+- kretprobe_instance代表自定义的kretprobe_instance实例,其中包含私有数据date;
+- pt_regs代表寄存器,根据平台的不同,可以获得传入参数和返回值等等;
+
+### 3.1.1 kretprobe_instance参数的含义
+
+使用kretprobe_instance中的date数据来传递数据,主要用于被探测函数前后的探针函数的数据传递,例如示例代码获得函数的执行时间等;
+
+**单个函数:**
+
+```C++
+struct my_data {
+    ktime_t entry_stamp;
+};
+ 
+static struct kretprobe my_kretprobe = {
+    .handler                = ret_handler,
+    .entry_handler            = entry_handler,
+    .data_size                = sizeof(struct my_data),
+    /* Probe up to 20 instances concurrently. */
+    .maxactive                = 20,
+};
+
+static int entry_handler(struct kretprobe_instance *ri, struct pt_regs *regs)
+{
+        struct my_data *data;
+ 
+        if (!current->mm)
+                return 1;        /* Skip kernel threads */
+ 
+        data = (struct my_data *)ri->data;
+        data->entry_stamp = ktime_get();
+        return 0;
+}
+```
+
+**多个函数:**
+
+```C++
+struct my_kretprobe_data {
+    int param1;
+    long param2;
+    char param3[32];
+};
+
+static struct kretprobe my_kretprobe = {
+    .handler = my_kretprobe_handler,
+    .data_size = sizeof(struct my_kretprobe_data),
+};
+
+static int my_kretprobe_handler(struct kretprobe_instance *ri, struct pt_regs *regs) {
+    struct my_kretprobe_data *data = (struct my_kretprobe_data *)ri->data;
+
+    // 使用定义的变量
+    printk(KERN_INFO "param1: %d, param2: %ld, param3: %s\n", data->param1, data->param2, data->param3);
+
+    return 0;
+}
+```
+
+### 3.1.3 pt_regs参数的含义
+
+1. 结构体定义： `struct pt_regs` 是一个定义在内核头文件中的结构体，它包含了处理器状态的寄存器值。在不同的架构下，这个结构体的内容可能会有所不同，因为不同的处理器架构会有不同的寄存器集合。
+2. 作用：
+   1. 当一个中断、异常或系统调用发生时，内核会将处理器的寄存器状态保存到这个结构体中，以便在处理完中断或异常后能够恢复到中断前的状态。
+   2. 在内核中，一些函数或钩子（如kprobe、kretprobe等）可能会接收到这个结构体作为参数，以便获取或修改处理器状态的寄存器值。
+3. 用途：
+   1. 在编写内核模块或处理中断、异常时，可以使用这个结构体来访问处理器状态的寄存器值，进行状态检查或修改。
+   2. 在一些内核钩子函数中，`struct pt_regs *regs` 参数可以提供有关当前处理器状态的信息，以便编写钩子函数的逻辑。
+
+## 3.2 调用时机
+
+### 3.2.1 entry_handler与ret_handler在什么时候被调用
+
+**函数entry_handler在do_fork函数被调用时触发调用**，注意第一个入参不是struct kretprobe结构，而是代表一个探测实例的struct kretprobe_instance结构，它从kretprobe的free_instances链表中分配，在跟踪完本次触发流程后回收。entry_handler函数利用了kretprobe_instance中私有数据，保存do_fork函数执行的开始时间。
+
+**函数ret_handler在do_fork函数执行完成返回后被调用**，它根据当前的时间减去kretprobe_instance中私有数据保存的起始时间，即可计算出do_fork函数执行的耗时。
 
 # 3.总结
 
